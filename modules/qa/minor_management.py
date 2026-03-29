@@ -1,45 +1,77 @@
 import streamlit as st
 import pandas as pd
-from modules.core import log_audit
 
-def show_minor_management(df, db_file):
-    st.subheader("📄 Реестр и управление коррекциями (Minor)")
+def show_minor_management(df, db_file, preselected_id=None):
+    st.subheader("📑 Общий реестр несоответствий")
     
-    minor_df = df[(df['Статус'] == "Подтверждено") & (df['Категория'].str.contains('Minor', na=False))]
+    # Фильтры поиска
+    with st.expander("🔍 Фильтры поиска и аналитики"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            f_process = st.multiselect("Процесс:", options=df['Код'].unique())
+        with col2:
+            f_cat = st.multiselect("Категория:", options=df['Категория'].unique())
+        with col3:
+            f_source = st.multiselect("Источник:", options=df['Источник'].unique())
+            
+    # Применение фильтров
+    df_display = df.copy()
+    if f_process:
+        df_display = df_display[df_display['Код'].isin(f_process)]
+    if f_cat:
+        df_display = df_display[df_display['Категория'].isin(f_cat)]
+    if f_source:
+        df_display = df_display[df_display['Источник'].isin(f_source)]
+
+    # СТРОГО ПО ЗАДАЧЕ: Добавляем Описание_OPS, чтобы видеть суть НС
+    cols_to_show = [
+        'ID', 'Дата_Время', 'Источник', 'Код', 'Автор', 'Должность', 
+        'Категория', 'Описание_OPS', 'Описание_QA', 'Статус', 'Corr_Done', 'CAPA_Done'
+    ]
     
-    if minor_df.empty:
-        st.info("Нет Minor-событий для коррекций.")
-    else:
-        for _, r in minor_df.iterrows():
-            icon = "✅" if r['Corr_Done'] == "Да" else "⏳"
-            with st.expander(f"{icon} ID {r['ID']} | {r['Код']} | {r['Категория']}"):
-                st.write(f"**Описание:** {r['Описание_QA']}")
+    # Проверка наличия колонок перед отображением
+    existing_cols = [c for c in cols_to_show if c in df_display.columns]
+    
+    # Форматирование таблицы
+    st.dataframe(
+        df_display[existing_cols].sort_values('ID', ascending=False),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # Блок редактирования (если выбрана запись)
+    st.write("---")
+    st.markdown("### 📝 Детальный просмотр и редактирование")
+    
+    selected_id = st.number_input("Введите ID для редактирования:", 
+                                  min_value=int(df['ID'].min()) if not df.empty else 0,
+                                  value=int(preselected_id) if preselected_id else None)
+    
+    if selected_id:
+        row = df[df['ID'] == selected_id]
+        if not row.empty:
+            row = row.iloc[0]
+            st.warning(f"Редактирование НС ID {selected_id}")
+            
+            with st.form("edit_nc_form"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    new_desc_ops = st.text_area("Описание (Персонал):", value=row['Описание_OPS'])
+                    new_cat = st.selectbox("Категория:", ["IntMinor", "IntMajor", "IntCritical", "ExtMinor", "ExtMajor", "ExtCritical"], 
+                                           index=["IntMinor", "IntMajor", "IntCritical", "ExtMinor", "ExtMajor", "ExtCritical"].index(row['Категория']))
+                with c2:
+                    new_desc_qa = st.text_area("Комментарий QA:", value=row['Описание_QA'])
+                    new_status = st.selectbox("Статус:", ["Черновик", "На верификации", "Подтверждено", "Отклонено"],
+                                              index=["Черновик", "На верификации", "Подтверждено", "Отклонено"].index(row['Статус']))
                 
-                with st.form(f"minor_form_{r['ID']}"):
-                    st.markdown("### 1. КОРРЕКЦИЯ")
-                    c1, c2, c3 = st.columns(3)
-                    m_corr = c1.text_input("Коррекция", value=r['Correction'] if pd.notna(r['Correction']) else "")
-                    m_dead = c2.text_input("Срок", value=r['Corr_Deadline'] if pd.notna(r['Corr_Deadline']) else "")
-                    m_own = c3.text_input("Ответственный", value=r['Corr_Owner'] if pd.notna(r['Corr_Owner']) else "")
-                    m_done = st.checkbox("Выполнено (QA)", value=(r['Corr_Done'] == "Да"))
-                    
-                    st.write("---")
-                    q_capa = st.radio("Требуется полномасштабная CAPA?", ["Нет", "Да"], 
-                                     index=1 if (pd.notna(r['CAPA_Plan']) and r['CAPA_Plan'] != "") else 0,
-                                     key=f"q_capa_{r['ID']}")
-                    
-                    if q_capa == "Да":
-                        st.markdown("### 2. CAPA")
-                        m_cause = st.text_area("Причина", value=r['Root_Cause'] if pd.notna(r['Root_Cause']) else "")
-                        m_plan = st.text_area("План", value=r['CAPA_Plan'] if pd.notna(r['CAPA_Plan']) else "")
-                        m_c_done = st.checkbox("CAPA проверена (QA)", value=(r['CAPA_Done'] == "Да"))
-
-                    if st.form_submit_button("Сохранить"):
-                        df.loc[df['ID'] == r['ID'], ['Correction', 'Corr_Deadline', 'Corr_Owner', 'Corr_Done']] = \
-                            [m_corr, m_dead, m_own, "Да" if m_done else "Нет"]
-                        if q_capa == "Да":
-                            df.loc[df['ID'] == r['ID'], ['Root_Cause', 'CAPA_Plan', 'CAPA_Done']] = \
-                                [m_cause, m_plan, "Да" if m_c_done else "Нет"]
-                        df.to_csv(db_file, index=False)
-                        st.success("Данные сохранены.")
-                        st.rerun()
+                if st.form_submit_button("Сохранить изменения"):
+                    # Логика сохранения в CSV
+                    df.loc[df['ID'] == selected_id, 'Описание_OPS'] = new_desc_ops
+                    df.loc[df['ID'] == selected_id, 'Описание_QA'] = new_desc_qa
+                    df.loc[df['ID'] == selected_id, 'Категория'] = new_cat
+                    df.loc[df['ID'] == selected_id, 'Статус'] = new_status
+                    df.to_csv(db_file, index=False)
+                    st.success("Данные обновлены!")
+                    st.rerun()
+        else:
+            st.error("НС с таким ID не найдено.")

@@ -1,98 +1,102 @@
 import streamlit as st
 import pandas as pd
+import os
 from datetime import datetime
 from config import PROCESSES
-from modules.core import log_audit
 
 def show_employee_interface(db_file, db_cols):
-    st.header("📝 Фиксация несоответствия")
+    st.title("📝 Фиксация несоответствия")
     
-    # Текущая дата и время
-    now_dt = datetime.now()
-    now_str = now_dt.strftime("%d.%m.%Y %H:%M")
-    st.caption(f"📅 **Дата и время фиксации:** {now_str}")
+    # 1. Секция даты и времени
+    dt_now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    st.caption(f"📅 Дата и время фиксации: {dt_now}")
     
     st.write("---")
 
-    # Контейнер для формы
-    with st.container():
-        # 1. Чекбокс для тех, кто не знает код процесса
-        dont_know = st.checkbox("❓ Не знаю / не уверен, к какому процессу относится НС")
+    # Проверка наличия данных сотрудника
+    if 'u_name' not in st.session_state or not st.session_state['u_name']:
+        st.warning("⚠️ Пожалуйста, сначала укажите ваше ФИО и должность в профиле.")
+        return
 
-        # 2. Выбор кода процесса (блокируется, если стоит галочка dont_know)
-        p_options = list(PROCESSES.keys())
-        p_code = st.selectbox(
-            "1. Код процесса:", 
-            options=p_options, 
-            disabled=dont_know,
-            format_func=lambda x: f"{x} - {PROCESSES[x].get('full_name', 'Наименование не задано')}",
-            help="Выберите процесс из списка или отметьте 'Не знаю', чтобы QA определил его сам."
-        )
+    # --- ИНТЕРАКТИВНЫЙ БЛОК (ВНЕ ФОРМЫ) ---
+    # Мы выносим выбор процесса сюда, чтобы страница обновлялась сразу при смене выбора
+    
+    not_sure = st.checkbox("❓ Не знаю / не уверен, к какому процессу относится НС")
+    
+    process_options = [f"{k} - {v['full_name']}" for k, v in PROCESSES.items()]
+    
+    selected_process_full = st.selectbox(
+        "1. Код процесса:",
+        options=process_options,
+        disabled=not_sure,
+        help="Выберите наиболее подходящий процесс из списка"
+    )
 
-        # Отображение областей процесса (скрываем, если код не выбран)
-        if not dont_know:
-            # ИСПОЛЬЗУЕМ .get('areas'), чтобы избежать KeyError, если ключа нет в config.py
-            areas_text = PROCESSES[p_code].get('areas', "Описание областей для данного процесса не заполнено в config.py")
-            st.info(f"🔍 **Области несоответствий для этого кода:**\n\n{areas_text}")
-        else:
-            st.warning("⚠️ Код процесса будет определен QA-менеджером при верификации записи.")
+    # ИСПРАВЛЕННАЯ ЛОГИКА ИЗВЛЕЧЕНИЯ КЛЮЧА
+    # Теперь мы берем первый элемент списка [0], чтобы получить "УО" или "УРМ"
+    selected_key = selected_process_full.split(" - ")[0] if not not_sure else "TBD"
+    
+    # Получаем данные процесса из config.py
+    process_data = PROCESSES.get(selected_key, {})
+    hint_text = process_data.get("hint", "Описание областей для данного процесса не заполнено в config.py")
 
-        # 3. Описание события
-        desc = st.text_area("2. Описание события (что произошло?):", placeholder="Опишите детали инцидента...")
+    # Синий блок с подсказками (теперь он обновляется мгновенно)
+    if not not_sure:
+        st.info(f"🔍 **Области несоответствий для этого кода:**\n\n{hint_text}")
+    else:
+        st.info("ℹ️ QA-инженер сам определит процесс при верификации.")
 
-        # 4. Количество фактов
-        cnt = st.number_input("3. Количество фактов:", min_value=1, value=1, step=1)
-
-        st.write("---")
+    # --- ФОРМА ВВОДА (ДЛЯ ТЕКСТА И ОТПРАВКИ) ---
+    with st.form("nc_fixation_form", clear_on_submit=True):
         
-        # Кнопка отправки
-        if st.button("Отправить в QA на верификацию", type="primary"):
-            if not desc:
-                st.error("❌ Пожалуйста, заполните описание события.")
-            else:
-                try:
-                    # Загружаем БД
-                    df = pd.read_csv(db_file)
-                    new_id = len(df) + 1
-                    
-                    # Определяем значения в зависимости от галочки
-                    final_code = "TBD" if dont_know else p_code
-                    final_process = "Определяется QA" if dont_know else PROCESSES[p_code].get('full_name', 'Неизвестный процесс')
-                    
-                    # Формируем строку (22 колонки согласно архитектуре)
-                    new_row = [
-                        new_id, 
-                        now_str, 
-                        st.session_state.get('u_name', 'Staff_User'), 
-                        final_code, 
-                        final_process, 
-                        desc, 
-                        "", # Описание_QA
-                        cnt, 
-                        "Staff", # Источник
-                        "NewNC", # Категория
-                        "На проверке" # Статус
-                    ]
-                    # Добавляем 11 пустых колонок для блоков коррекций и CAPA
-                    new_row += [""] * 11
-                    
-                    # Сохранение
-                    new_df = pd.DataFrame([new_row], columns=db_cols)
-                    new_df.to_csv(db_file, mode='a', header=False, index=False)
-                    
-                    # Логирование
-                    log_audit(st.session_state.get('u_name', 'Staff_User'), "Регистрация НС", f"ID {new_id} ({final_code})")
-                    
-                    st.success("✅ Отправлено. Запись появится у QA-менеджера.")
-                    st.balloons()
-                    
-                except Exception as e:
-                    st.error(f"Ошибка при сохранении: {e}")
+        description = st.text_area("2. Описание события (что произошло?):", 
+                                  placeholder="Опишите детали инцидента...")
+        
+        fact_count = st.number_input("3. Количество фактов:", min_value=1, value=1, step=1)
 
-    # Инструкция внизу страницы
+        submit_btn = st.form_submit_button("Отправить в QA на верификацию")
+
+        if submit_btn:
+            if not description:
+                st.error("Пожалуйста, заполните описание события.")
+            else:
+                # Определяем итоговый код и название процесса
+                final_code = "TBD" if not_sure else selected_key
+                final_process = "Определит QA" if not_sure else process_data.get("full_name", "Неизвестно")
+
+                # Загрузка БД
+                if os.path.exists(db_file):
+                    df = pd.read_csv(db_file)
+                else:
+                    df = pd.DataFrame(columns=db_cols)
+
+                # Генерация ID
+                new_id = int(df['ID'].max() + 1) if not df.empty else 1
+                
+                # Создание записи
+                new_entry = {col: "" for col in db_cols}
+                new_entry.update({
+                    'ID': new_id,
+                    'Дата_Время': dt_now,
+                    'Автор': st.session_state['u_name'],
+                    'Должность': st.session_state.get('u_job', 'Не указана'),
+                    'Код': final_code,
+                    'Процесс': final_process,
+                    'Описание_OPS': description,
+                    'Кол_во': fact_count,
+                    'Статус': "На проверке",
+                    'Категория': "TBD"
+                })
+
+                df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
+                df.to_csv(db_file, index=False)
+                
+                st.success(f"✅ Несоответствие ID {new_id} успешно зарегистрировано!")
+                st.balloons()
+
+    # Памятка
     with st.expander("ℹ️ Памятка для сотрудника"):
         st.write("""
-            - Фиксируйте НС сразу после обнаружения.
-            - Если вы сомневаетесь в коде процесса, поставьте галочку 'Не знаю' — это не ошибка.
-            - Ваше описание должно быть понятным для проведения расследования.
+        *   Описывайте факт, а не догадки.
+        *   Указывайте номера оборудования или документов.
         """)
